@@ -626,12 +626,23 @@
     // One-time pull of every shared key so a newly-connected device starts
     // in step with the team, then subscribes to future changes.
     return cloudDb.collection('teams').doc(cloudConfig.teamCode).collection('kv').get().then(function(snap){
+      var inCloud = {};
       snap.forEach(function(doc){
+        inCloud[doc.id] = true;
         var data = doc.data();
         if(!data) return;
         try{
           if(data.deleted){ window.localStorage.removeItem(doc.id); }
           else if(typeof data.value === 'string'){ window.localStorage.setItem(doc.id, data.value); }
+        }catch(e){}
+      });
+      // Anything saved on this device before it was connected (or before that
+      // screen synced) and missing from the cloud is uploaded now.
+      CLOUD_KV_KEYS.forEach(function(k){
+        if(inCloud[k]) return;
+        try{
+          var v = window.localStorage.getItem(k);
+          if(typeof v === 'string' && v.length) cloudPush(k, v, false);
         }catch(e){}
       });
     });
@@ -689,6 +700,57 @@
     toast('Cloud Sync disconnected — this device is back to local-only storage');
   }
 
+  function cloudKb(str){ return Math.round((str || '').length / 1024) + ' KB'; }
+  function cloudDiagSetup(){
+    var box = document.getElementById('cloudDiag');
+    function say(t){ var b = document.getElementById('cloudDiag'); if(b) b.textContent = t; }
+    function localLines(){
+      return CLOUD_KV_KEYS.filter(function(k){ var v = null; try{ v = window.localStorage.getItem(k); }catch(e){} return typeof v === 'string' && v.length; })
+        .map(function(k){ return k + ' ' + cloudKb(window.localStorage.getItem(k)); });
+    }
+    function refresh(){
+      if(!cloudDb || !cloudConfig){ say('Not connected.'); return; }
+      say('Checking cloud…');
+      cloudDb.collection('teams').doc(cloudConfig.teamCode).collection('kv').get({source:'server'}).then(function(snap){
+        var rows = [];
+        snap.forEach(function(d){ var x = d.data() || {}; rows.push(d.id + (x.deleted ? ' (deleted)' : ' ' + cloudKb(x.value))); });
+        say('Cloud (' + rows.length + '): ' + (rows.join(', ') || 'empty') + '\n\nThis device: ' + (localLines().join(', ') || 'empty'));
+      }).catch(function(e){ say('Could not read cloud: ' + (e && e.message ? e.message : e)); });
+    }
+    document.getElementById('cloudUpBtn').onclick = async function(){
+      if(!cloudDb || !cloudConfig){ toast('Not connected'); return; }
+      var ok = 0, errs = [];
+      for(var i = 0; i < CLOUD_KV_KEYS.length; i++){
+        var k = CLOUD_KV_KEYS[i], v = null;
+        try{ v = window.localStorage.getItem(k); }catch(e){}
+        if(typeof v !== 'string' || !v.length) continue;
+        try{
+          await kvDocRef(k).set({device: DEVICE_ID, updatedAt: firebase.firestore.FieldValue.serverTimestamp(), deleted:false, value:v}, {merge:true});
+          ok++;
+        }catch(e){ errs.push(k + ': ' + (e && e.message ? e.message : e)); }
+      }
+      toast(errs.length ? 'Upload problem: ' + errs[0] : 'Sent ' + ok + ' items to cloud');
+      refresh();
+    };
+    document.getElementById('cloudDownBtn').onclick = function(){
+      if(!cloudDb || !cloudConfig){ toast('Not connected'); return; }
+      cloudDb.collection('teams').doc(cloudConfig.teamCode).collection('kv').get({source:'server'}).then(function(snap){
+        var n = 0;
+        snap.forEach(function(d){
+          var x = d.data() || {};
+          try{
+            if(x.deleted){ window.localStorage.removeItem(d.id); }
+            else if(typeof x.value === 'string'){ window.localStorage.setItem(d.id, x.value); n++; }
+          }catch(e){}
+        });
+        toast('Got ' + n + ' items from cloud');
+        closeOverlay();
+        if(currentView === 'profiles') showProfilesView(); else if(currentView === 'squad') showSquadView(); else render();
+      }).catch(function(e){ toast('Could not read cloud: ' + (e && e.message ? e.message : e)); });
+    };
+    refresh();
+  }
+
   function openCloudSheet(){
     closeOverlay();
     overlayRoot = document.createElement('div');
@@ -715,6 +777,9 @@
           (isConnected ? '<button id="cloudDisconnectBtn">Disconnect</button>' : '<button id="closeCloudCancel">Cancel</button>') +
           '<button class="primary" id="cloudConnectBtn">' + (isConnected ? 'Reconnect' : 'Connect') + '</button>' +
         '</div>' +
+        (isConnected ? '<div class="field cloud-field" style="margin-top:14px;"><label>Sync check</label>' +
+          '<div id="cloudDiag" class="cloud-status-line" style="white-space:pre-wrap;">Checking…</div>' +
+          '<div class="sheet-actions"><button id="cloudUpBtn">Send this device to cloud</button><button id="cloudDownBtn">Get from cloud</button></div></div>' : '') +
         '<p class="sub" style="margin-top:18px;"><b>One-time Firebase setup</b> (do this once, on firebase.google.com):</p>' +
         '<ol class="sub" style="padding-left:18px; margin:0 0 12px;">' +
           '<li>Create a free Firebase project, then add a Web App to it — Firebase shows you the config object to paste above.</li>' +
@@ -729,6 +794,7 @@
     document.getElementById('closeCloudSheet').onclick = closeOverlay;
     var cancelBtn = document.getElementById('closeCloudCancel');
     if(cancelBtn) cancelBtn.onclick = closeOverlay;
+    if(cloudConfig && document.getElementById('cloudDiag')) cloudDiagSetup();
     var discBtn = document.getElementById('cloudDisconnectBtn');
     if(discBtn) discBtn.onclick = function(){ disconnectCloud(); closeOverlay(); };
     document.getElementById('cloudConnectBtn').onclick = function(){
