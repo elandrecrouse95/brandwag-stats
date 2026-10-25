@@ -872,7 +872,7 @@
   }
   var VIEW_NAMES = {main:'Home', lineup:'Lineup', dashboard:'Dashboard', tracking:'Video Tracking', calendar:'Calendar',
     squad:'Squad', ratings:'Rate', notes:'Notes', gameplay:'Game Play', jersey:'Jersey', resources:'Resources',
-    clubhistory:'Club History', battlestats:'Battle Stats', profiles:'Profiles', attendance:'Attendance', weather:'Weather', report:'Match report', compare:'Compare', tactics:'Tactics'};
+    clubhistory:'Club History', battlestats:'Battle Stats', profiles:'Profiles', attendance:'Attendance', weather:'Weather', report:'Match report', compare:'Compare', tactics:'Tactics', playerreport:'Player report'};
   function presenceView(){ return VIEW_NAMES[currentView] || currentView || ''; }
   function presenceBeat(online){
     if(!cloudDb || !cloudConfig) return;
@@ -1879,7 +1879,9 @@
           '<div class="field"><label>Weight (kg)</label><input id="ppWeight" type="number" inputmode="decimal" min="0" max="300" step="any" value="' + escapeHtml(String(draft.weight || '')) + '"></div>' +
         '</div>' +
         '<div class="field"><label>Birthday <span id="ppAge" class="pp-age"></span></label><input id="ppBirthday" type="date" value="' + escapeHtml(draft.birthday || '') + '"></div>' +
+        '<div class="field"><label>Squad number (links Ratings, Compare, Battle Stats, Register)</label><input id="ppSquadNo" type="number" inputmode="numeric" min="1" max="29" placeholder="e.g. 9" value="' + escapeHtml(String(draft.squadNo || '')) + '"></div>' +
         '<div class="sheet-actions"><button id="ppCancel" type="button">Cancel</button><button class="primary" id="ppSave" type="button">Save</button></div>' +
+        (existing ? '<div class="sheet-actions"><button id="ppReport" type="button" class="primary" style="width:100%;">Save &amp; export player report</button></div>' : '') +
         (existing ? '<div class="sheet-actions"><button id="ppDelete" type="button" class="pp-danger">Delete player</button></div>' : '') +
       '</div>';
     document.body.appendChild(overlayRoot);
@@ -1920,6 +1922,8 @@
       draft.height = num('ppHeight', 260);
       draft.weight = num('ppWeight', 300);
       draft.birthday = document.getElementById('ppBirthday').value || '';
+      var sn = parseInt(document.getElementById('ppSquadNo').value, 10);
+      draft.squadNo = (sn >= 1 && sn <= 29) ? sn : '';
       var ix = -1;
       profilesList.forEach(function(p, i){ if(p.id === draft.id) ix = i; });
       if(ix === -1) profilesList.push(draft); else profilesList[ix] = draft;
@@ -1929,6 +1933,10 @@
       if(currentView === 'profiles') renderProfiles();
     };
     if(existing){
+      document.getElementById('ppReport').onclick = async function(){
+        await document.getElementById('ppSave').onclick();
+        if(profilesList.some(function(x){ return x.id === draft.id; })) showPlayerReportView(draft.id);
+      };
       document.getElementById('ppDelete').onclick = function(){
         showConfirmSheet('Delete player', 'Delete ' + escapeHtml(profileFullName(existing)) + '\'s profile? This cannot be undone.', 'Delete', async function(){
           profilesList = profilesList.filter(function(p){ return p.id !== existing.id; });
@@ -1960,7 +1968,7 @@
         have[key] = true;
         profilesList.push({id:'p_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6) + added,
           name:name, surname:surname, height:'', weight:'', birthday:'',
-          position:(sp.number >= 1 && sp.number <= 15) ? PROFILE_POS_BY_NUM[sp.number] : '', photo:''});
+          position:(sp.number >= 1 && sp.number <= 15) ? PROFILE_POS_BY_NUM[sp.number] : '', photo:'', squadNo:(raw.indexOf('/') < 0 ? sp.number : '')});
         added++;
       });
     });
@@ -4407,7 +4415,7 @@
     '.rp-note{white-space:pre-wrap; background:#fafafa; border:1px solid #e3e3e3; border-radius:8px; padding:8px 10px; min-height:40px;}',
     '.rp-foot{margin-top:14px; padding-top:8px; border-top:1px solid #ccd5cf; color:#666; font-size:11px; display:flex; justify-content:space-between;}',
     '.rp-tot td{font-weight:700; background:#f2f6f3;}',
-    '@media (max-width:560px){ .rp-two{grid-template-columns:1fr;} .rp-meta{grid-template-columns:1fr;} .rp-team b{font-size:28px;} }',
+    '@media (max-width:560px){ .rp{padding:14px 12px;} .rp th,.rp td{padding:4px 3px; font-size:11px;} .rp td.n,.rp th.n{width:auto;} .rp-two{grid-template-columns:1fr;} .rp-meta{grid-template-columns:1fr;} .rp-team b{font-size:28px;} }',
     '@page{size:A4; margin:12mm;}',
     '@media print{ html,body{background:#fff !important;} .brandbar,#presenceBar,#wmark,#toast,.bottombar,.rp-noprint{display:none !important;} #app{padding:0 !important; margin:0 !important;} .rp{border:0; border-radius:0; padding:0; max-width:none;} .rp-two{grid-template-columns:1fr 1fr;} .rp-meta{grid-template-columns:repeat(2,1fr);} }'
   ].join('\n');
@@ -5755,6 +5763,130 @@
     }
   }
 
+  // ---------- player report (Profile + Compare + Register + Ratings + Battle Stats) ----------
+  var prepId = null;
+  function prepSquadNo(p, squad){
+    var n = parseInt(p.squadNo, 10);
+    if(n >= 1 && n <= 29) return n;
+    var full = profileFullName(p).toLowerCase(), first = (p.name || '').trim().toLowerCase();
+    var hit = null;
+    (squad || []).forEach(function(sp){
+      if(hit || !sp.name) return;
+      String(sp.name).split('/').forEach(function(part){
+        part = part.replace(/\([^)]*\)/g, '').trim().toLowerCase();
+        if(!hit && part && (part === full || part === first)) hit = sp.number;
+      });
+    });
+    return hit;
+  }
+  function prepFmtDate(ds){ try{ return attParse(ds).toLocaleDateString('en-ZA', {day:'numeric', month:'short', year:'numeric'}); }catch(e){ return ds || ''; } }
+  async function prepBuildHtml(p){
+    var squad = await loadSquadRaw(); if(!squad) squad = defaultSquad();
+    var num = prepSquadNo(p, squad);
+    var rawR = await loadRatingsRaw(); var rat = (rawR && num != null) ? rawR[String(num)] : null;
+    await loadCompareData(); await loadBattleData();
+    var logo = ''; try{ var li = document.querySelector('.brand-logo'); if(li) logo = li.getAttribute('src'); }catch(e){}
+    var age = profileAge(p.birthday);
+    var pos = p.position || (num != null ? (PROFILE_POS_BY_NUM[num] || '') : '');
+    var h = '<div class="rp">';
+    h += '<div class="rp-head">' + (logo ? '<img src="' + logo + '" alt="">' : '') + '<div><h1>Die Brandwag Hoërskool &mdash; 1st XV</h1><p>Player report &middot; ' + escapeHtml(new Date().toLocaleDateString('en-ZA', {day:'numeric', month:'long', year:'numeric'})) + '</p></div></div>';
+    var photo = (p.photo && String(p.photo).indexOf('data:image/') === 0) ? '<img src="' + p.photo + '" alt="" style="width:92px; height:92px; object-fit:cover; border-radius:10px; border:1px solid #cfd8d2;">' : '';
+    h += '<div class="rp-banner" style="justify-content:flex-start; gap:16px;">' + photo + '<div style="flex:1;"><div style="font-size:22px; font-weight:700;">' + escapeHtml(profileFullName(p)) + '</div><div style="color:#555; margin-top:2px;">' + escapeHtml(pos || 'Position not set') + (num != null ? ' &middot; Squad #' + num : '') + '</div></div></div>';
+
+    h += '<h2>Profile</h2><div class="rp-meta">' +
+      '<div><span>Age:</span> ' + (age == null ? 'Not recorded' : age + ' years') + '</div><div><span>Birthday:</span> ' + escapeHtml(p.birthday ? prepFmtDate(p.birthday) : 'Not recorded') + '</div>' +
+      '<div><span>Height:</span> ' + (p.height ? escapeHtml(String(p.height)) + ' cm' : 'Not recorded') + '</div><div><span>Weight:</span> ' + (p.weight ? escapeHtml(String(p.weight)) + ' kg' : 'Not recorded') + '</div></div>';
+
+    // Register
+    var ids = {}; ids[p.id] = true; if(num != null) ids['s' + num] = true;
+    var cnt = {P:0, L:0, E:0, I:0, A:0}, rows = [];
+    attSessions().forEach(function(s){
+      var v = null; Object.keys(ids).forEach(function(k){ if(!v && s.marks && s.marks[k]) v = s.marks[k]; });
+      if(v && cnt[v] !== undefined){ cnt[v]++; rows.push({date:s.date, type:s.type || 'Practice', v:v}); }
+    });
+    var tot = rows.length, att = cnt.P + cnt.L;
+    var LBL = {P:'Present', L:'Late', E:'Excused', I:'Injured', A:'Absent'};
+    h += '<h2>Register (attendance)</h2>';
+    if(!tot) h += '<p style="margin:0; color:#666;">No attendance recorded for this player yet.</p>';
+    else {
+      h += '<table><tr><th>Sessions</th><th class="n">Present</th><th class="n">Late</th><th class="n">Excused</th><th class="n">Injured</th><th class="n">Absent</th><th class="n">Attendance</th></tr><tr><td>' + tot + '</td><td class="n">' + cnt.P + '</td><td class="n">' + cnt.L + '</td><td class="n">' + cnt.E + '</td><td class="n">' + cnt.I + '</td><td class="n">' + cnt.A + '</td><td class="n"><b>' + Math.round(100 * att / tot) + '%</b></td></tr></table>';
+      h += '<table style="margin-top:8px;"><tr><th>Latest sessions</th><th>Type</th><th>Status</th></tr>' + rows.slice(0, 8).map(function(r){ return '<tr><td>' + escapeHtml(prepFmtDate(r.date)) + '</td><td>' + escapeHtml(r.type) + '</td><td>' + LBL[r.v] + '</td></tr>'; }).join('') + '</table>';
+    }
+
+    // Ratings
+    h += '<h2>Ratings</h2>';
+    if(!rat) h += '<p style="margin:0; color:#666;">' + (num == null ? 'No squad number linked: add one in the player\'s profile to include Ratings, Compare and Battle Stats.' : 'No ratings recorded for this player yet.') + '</p>';
+    else {
+      var full = Object.assign(blankRating(), rat);
+      h += '<table><tr>' + RATING_FIELDS.map(function(f){ return '<th class="n">' + f.label + '</th>'; }).join('') + '<th class="n">OVR</th></tr><tr>' + RATING_FIELDS.map(function(f){ return '<td class="n">' + (full[f.key] || 0) + '</td>'; }).join('') + '<td class="n"><b>' + overallRating(full) + '</b></td></tr></table>';
+      h += '<table style="margin-top:8px;"><tr><th>Fitness testing</th>' + TESTING_FIELDS.map(function(f){ return '<th class="n">' + f.label + ' (' + f.unit + ')</th>'; }).join('') + '</tr><tr><td>Latest</td>' + TESTING_FIELDS.map(function(f){ return '<td class="n">' + (full[f.key] ? full[f.key] : '&ndash;') + '</td>'; }).join('') + '</tr></table>';
+    }
+
+    // Compare
+    h += '<h2>Compare (provincial u18 norms)</h2>';
+    var group = num != null ? compareGroupFor(num) : null;
+    var ce = (num != null && compareData[String(num)]) ? compareEntry(num) : null;
+    var any = ce && COMPARE_METRIC_KEYS.some(function(k){ return ce[k] && ce[k].length; });
+    if(!any) h += '<p style="margin:0; color:#666;">' + (num == null ? 'No squad number linked.' : 'No test results logged for this player yet.') + '</p>';
+    else {
+      var d = compareDerived(ce, group);
+      h += '<p style="margin:0 0 6px; color:#555;">Norm group: <b>' + escapeHtml(group ? group.label : 'none') + '</b></p>';
+      h += '<table><tr><th>Test</th><th class="n">Latest</th><th class="n">First</th><th class="n">Results</th><th class="n">Norm</th><th>Result</th></tr>';
+      COMPARE_METRIC_KEYS.forEach(function(k){
+        var arr = ce[k] || [], M = COMPARE_METRIC_META[k];
+        if(!arr.length) return;
+        var latest = arr[arr.length - 1].value, first = arr[0].value;
+        var norm = group ? M.normFromGroup(group) : null, status = '';
+        var normTxt = norm == null ? '&ndash;' : (M.normDir === 'min' ? '&ge; ' : '&le; ') + M.format(norm);
+        if(k === 'bench'){
+          normTxt = group ? '&ge; ' + group.benchXbw + ' x BW' : '&ndash;';
+          status = d.bench && d.bench.meets != null ? (d.bench.meets ? 'Meets norm' : 'Below norm') : '';
+          if(d.benchRatio) normTxt += ' (now ' + d.benchRatio.toFixed(2) + ')';
+        } else if(k === 'skinfold'){
+          var b = skinfoldBand(latest, group); status = b ? b.label : '';
+        } else if(d[k] && d[k].meets != null) status = d[k].meets ? 'Meets norm' : 'Below norm';
+        h += '<tr><td>' + M.label + '</td><td class="n">' + M.format(latest) + '</td><td class="n">' + M.format(first) + '</td><td class="n">' + arr.length + '</td><td class="n" style="width:auto;">' + normTxt + '</td><td><b>' + escapeHtml(status) + '</b></td></tr>';
+      });
+      h += '</table>';
+    }
+
+    // Battle stats
+    h += '<h2>Battle stats</h2>';
+    var be = num != null ? battleData[String(num)] : null;
+    if(!be || !(be.battles || be.minutes)) h += '<p style="margin:0; color:#666;">' + (num == null ? 'No squad number linked.' : 'No battle stats recorded for this player yet.') + '</p>';
+    else {
+      var bd = battleDerived(be), bench = battleBenchmarkFor(num);
+      var inR = (bd.secPerBattle != null && bench) ? (bd.secPerBattle >= bench.min && bd.secPerBattle <= bench.max) : null;
+      h += '<table><tr><th class="n">Battles</th><th class="n">Minutes</th><th class="n">Successful</th><th class="n">Success</th><th class="n">Sec / battle</th><th class="n">Battles / 10 min</th><th>Benchmark</th></tr><tr><td class="n">' + (be.battles || 0) + '</td><td class="n">' + (be.minutes || 0) + '</td><td class="n">' + (be.successful || 0) + '</td><td class="n">' + (bd.successPct == null ? '&ndash;' : Math.round(bd.successPct) + '%') + '</td><td class="n">' + (bd.secPerBattle == null ? '&ndash;' : Math.round(bd.secPerBattle)) + '</td><td class="n">' + (bd.per10min == null ? '&ndash;' : bd.per10min.toFixed(1)) + '</td><td>' + (bench ? escapeHtml(bench.label) + ' ' + bench.min + '-' + bench.max + 's' + (inR === null ? '' : inR ? ' (in range)' : ' (outside range)') : '&ndash;') + '</td></tr></table>';
+    }
+    h += '<div class="rp-foot"><span>Generated ' + escapeHtml(new Date().toLocaleString('en-ZA', {day:'numeric', month:'short', year:'numeric', hour:'2-digit', minute:'2-digit'})) + (coachName() ? ' by ' + escapeHtml(coachName()) : '') + '</span><span>@Crouse V1</span></div></div>';
+    return h;
+  }
+  async function showPlayerReportView(id){
+    await loadProfiles();
+    prepId = id; currentView = 'playerreport'; render();
+  }
+  async function renderPlayerReport(){
+    var p = profilesList.filter(function(x){ return x.id === prepId; })[0];
+    if(!p){ showProfilesView(); return; }
+    app.innerHTML = '<div class="rp-noprint" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">' +
+      '<button class="back-btn" id="prBack">Back</button><button class="back-btn" id="prPrint" style="font-weight:700;">Print / Save as PDF</button><button class="back-btn" id="prDl">Download file</button></div>' +
+      '<style>' + REPORT_CSS + '</style><div id="prBody">Building report&hellip;</div>';
+    document.getElementById('prBack').onclick = showProfilesView;
+    document.getElementById('prPrint').onclick = function(){ try{ window.print(); }catch(e){ toast('Printing is not available here'); } };
+    var body = await prepBuildHtml(p);
+    var bd = document.getElementById('prBody'); if(bd) bd.innerHTML = body;
+    var dl = document.getElementById('prDl');
+    if(dl) dl.onclick = function(){
+      var doc = '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Player report - ' + escapeHtml(profileFullName(p)) + '</title><style>body{margin:0; padding:14px; background:#eef1ee;}' + REPORT_CSS + '</style></head><body>' + body + '</body></html>';
+      var a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([doc], {type:'text/html'}));
+      a.download = 'Player report - ' + profileFullName(p).replace(/[^\w ]+/g, '') + '.html';
+      document.body.appendChild(a); a.click();
+      setTimeout(function(){ URL.revokeObjectURL(a.href); a.remove(); }, 2000);
+    };
+  }
+
   // ---------- live match categories ----------
   var liveCat = (function(){ try{ return window.localStorage.getItem('live:cat') || 'Score'; }catch(e){ return 'Score'; } })();
   function liveCats(){
@@ -5798,6 +5930,7 @@
     if(currentView === 'weather'){ renderWeather(); return; }
     if(currentView === 'report'){ renderReport(); return; }
     if(currentView === 'compare'){ renderCompare(); return; }
+    if(currentView === 'playerreport'){ renderPlayerReport(); return; }
     if(currentView === 'tactics'){ renderTactics(); return; }
     if(!state){
       app.innerHTML =
